@@ -1,91 +1,95 @@
-import streamlit as st
+# requirements: streamlit, pypdf, pymupdf
+import os
 from io import BytesIO
+from datetime import datetime
+
+import streamlit as st
 from pypdf import PdfReader, PdfWriter
 import fitz  # PyMuPDF
 
-st.set_page_config(page_title="PDF Personalizer", layout="centered")
-st.title("PDF Personalizer (Name & Affiliation)")
+st.set_page_config(page_title="PDF 이름/소속 입력", layout="centered")
+st.title("📄 PDF 템플릿에 이름·소속 입력")
 
-# ---------------- UI ----------------
-tmpl = st.file_uploader("Upload your PDF template", type=["pdf"])
-method = st.radio("Choose method", ["Fill PDF form fields (AcroForm)", "Overlay text at coordinates"])
+st.markdown("템플릿 PDF(예: 증명서)를 업로드하고, 이름/소속을 입력한 뒤 생성하세요.")
 
-col1, col2 = st.columns(2)
-with col1:
-    name = st.text_input("Name", value="Jane Doe")
-with col2:
-    aff  = st.text_input("Affiliation", value="English Dept., GNU")
+tmpl = st.file_uploader("① 템플릿 PDF 업로드", type=["pdf"])
 
-# If overlay method, ask for positions / style
-if method == "Overlay text at coordinates":
-    st.caption("Coordinates in points (1 pt = 1/72 inch). Origin is top-left.")
-    c1, c2 = st.columns(2)
-    with c1:
-        x_name = st.number_input("Name X", min_value=0, max_value=5000, value=72, step=1)
-        x_aff  = st.number_input("Affiliation X", min_value=0, max_value=5000, value=72, step=1)
-        fontsize = st.slider("Font size", 8, 48, value=14)
-    with c2:
-        y_name = st.number_input("Name Y", min_value=0, max_value=5000, value=150, step=1)
-        y_aff  = st.number_input("Affiliation Y", min_value=0, max_value=5000, value=180, step=1)
-    all_pages = st.checkbox("Apply to all pages", value=False)
+c1, c2 = st.columns(2)
+with c1:
+    name = st.text_input("이름", value="홍길동")
+with c2:
+    aff = st.text_input("소속", value="영어교육과")
 
-go = st.button("Generate PDF", type="primary", disabled=(tmpl is None))
+method = st.radio("② 방법 선택", ["PDF 폼 채우기(있으면 권장)", "좌표 덧씌우기(폼 없을 때)"])
 
-# --------------- ACTION ---------------
-if go:
-    bytes_in = tmpl.read()
-    if method == "Fill PDF form fields (AcroForm)":
-        # Read and list fields
-        reader = PdfReader(BytesIO(bytes_in))
-        fields = reader.get_fields() or {}
-        if not fields:
-            st.warning("No form fields found. Switch to 'Overlay text at coordinates', or use a form-enabled template.")
-        # Fill fields (update here to match your actual field names)
-        # Try common names; show hints to user
-        st.info("Available form field names: " + (", ".join(fields.keys()) if fields else "none"))
-        data = {
-            # CHANGE these keys to match your template (exact field names)
-            "name": name,
-            "Name": name,
-            "full_name": name,
-            "affiliation": aff,
-            "Affiliation": aff,
-            "org": aff,
-        }
-        # Keep only keys that exist in the template
-        data = {k: v for k, v in data.items() if k in fields}
+# ---------- Helpers ----------
+def fill_form_fields(pdf_bytes: bytes, data_map: dict) -> BytesIO | None:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    fields = reader.get_fields() or {}
+    st.info("감지된 폼 필드: " + (", ".join(fields.keys()) if fields else "없음"))
+    if not fields:
+        st.warning("폼이 없는 PDF 같습니다. '좌표 덧씌우기' 방법을 사용하세요.")
+        return None
 
-        if not data:
-            st.error("Could not match any field names. Check the field names in your template.")
-        else:
-            writer = PdfWriter()
-            writer.clone_document_from_reader(reader)
-            # Fill each page’s fields (safe for multi-page)
-            for page in writer.pages:
-                writer.update_page_form_field_values(page, data)
-            # Make sure values render
-            if "/AcroForm" in writer._root_object:
-                writer._root_object["/AcroForm"].update({"/NeedAppearances": True})
+    # 템플릿에 실제로 존재하는 필드만 남김
+    data = {k: v for k, v in data_map.items() if k in fields}
+    if not data:
+        st.error("입력하려는 항목 이름이 템플릿 필드와 일치하지 않습니다. 필드명을 확인하세요.")
+        return None
 
-            out = BytesIO()
-            writer.write(out)
-            out.seek(0)
-            st.success("PDF generated.")
-            st.download_button("Download filled PDF", out, file_name="filled.pdf", mime="application/pdf")
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    for page in writer.pages:
+        writer.update_page_form_field_values(page, data)
+    # 값이 보이도록
+    if "/AcroForm" in writer._root_object:
+        writer._root_object["/AcroForm"].update({"/NeedAppearances": True})
 
-    else:
-        # Overlay text at coordinates using PyMuPDF
-        doc = fitz.open(stream=bytes_in, filetype="pdf")
-        pages_to_edit = range(len(doc)) if all_pages else [0]
-        for pno in pages_to_edit:
-            page = doc[pno]
-            # Draw black text; fontname 'helv' is built-in Helvetica
-            page.insert_text((x_name, y_name), name, fontname="helv", fontsize=fontsize, fill=(0, 0, 0))
-            page.insert_text((x_aff,  y_aff),  aff,  fontname="helv", fontsize=fontsize, fill=(0, 0, 0))
+    out = BytesIO()
+    writer.write(out); out.seek(0)
+    return out
 
-        out = BytesIO()
-        doc.save(out)
-        doc.close()
-        out.seek(0)
-        st.success("PDF generated.")
-        st.download_button("Download personalized PDF", out, file_name="personalized.pdf", mime="application/pdf")
+def overlay_text(pdf_bytes: bytes,
+                 name: str, aff: str,
+                 name_pos: tuple[float, float], aff_pos: tuple[float, float],
+                 fontsize: int, font_path: str | None, all_pages: bool) -> BytesIO:
+    """
+    name_pos, aff_pos are percentages (0~100) of page width/height (easier to align).
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = range(len(doc)) if all_pages else [0]
+
+    for pno in pages:
+        page = doc[pno]
+        w, h = page.rect.width, page.rect.height
+        nx = w * (name_pos[0] / 100.0)
+        ny = h * (name_pos[1] / 100.0)
+        ax = w * (aff_pos[0] / 100.0)
+        ay = h * (aff_pos[1] / 100.0)
+
+        # Use a Korean font if provided; otherwise PDF default (may not render Hangul)
+        page.insert_text((nx, ny), name, fontname="KRFont", fontfile=font_path,
+                         fontsize=fontsize, fill=(0, 0, 0))
+        page.insert_text((ax, ay),  aff,  fontname="KRFont", fontfile=font_path,
+                         fontsize=fontsize, fill=(0, 0, 0))
+
+    out = BytesIO(); doc.save(out); doc.close(); out.seek(0)
+    return out
+
+# ---------- UI for each method ----------
+if method == "PDF 폼 채우기(있으면 권장)":
+    st.caption("템플릿에 실제 폼 필드(예: 성명, 소속)가 있을 때 사용합니다.")
+    st.markdown("- **PDF 내 폼 필드 이름**이 무엇인지 모르면, 바로 아래 ‘생성’ 후 표시되는 목록을 보고 이름을 맞춰 주세요.")
+
+else:
+    st.caption("폼이 없을 때 화면 위치를 잡아 텍스트를 그려 넣습니다.")
+    with st.expander("폰트(한글) & 위치 설정", expanded=True):
+        colA, colB = st.columns(2)
+        with colA:
+            name_x = st.slider("이름 X(%)", 0.0, 100.0, 20.0, 0.1)
+            name_y = st.slider("이름 Y(%)", 0.0, 100.0, 35.0, 0.1)
+            fontsize = st.slider("폰트 크기", 8, 48, 16)
+        with colB:
+            aff_x = st.slider("소속 X(%)", 0.0, 100.0, 20.0, 0.1)
+            aff_y = st.slider("소속 Y(%)", 0.0, 100.0, 42.0, 0.1)
+            all_pages = st.checkbox("모든 페이지에 적용", valu_
