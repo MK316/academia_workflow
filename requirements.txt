@@ -1,0 +1,7 @@
+pymupdf
+streamlit
+pypdf
+pandas
+numpy
+matplotlib
+gtts
